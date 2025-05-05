@@ -170,25 +170,14 @@ const createAxiosInstance = async (videoId) => {
 };
 
 // Browser-like headers
-const getBrowserHeaders = (videoId, userAgent) => {
-    return {
-        "User-Agent": userAgent,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Content-Type": "application/json",
-        Origin: "https://www.youtube.com",
-        Connection: "keep-alive",
-        Referer: `https://www.youtube.com/watch?v=${videoId}`,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        TE: "trailers",
-        DNT: "1",
-        Pragma: "no-cache",
-        "Cache-Control": "no-cache",
-    };
-};
+const getBrowserHeaders = (videoId, userAgent) => ({
+  "User-Agent": userAgent,
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.5",
+  Connection: "keep-alive",
+  Referer: `https://www.youtube.com/watch?v=${videoId}`,
+  "Upgrade-Insecure-Requests": "1"
+});
 
 // Initial page visit to get cookies
 const initialVisit = async (videoId) => {
@@ -374,65 +363,35 @@ function extractBestStreamUrl(data, itag = null) {
 }
 
 // API endpoints
-app.get("/stream", async (req, res) => {
-    try {
-        const { url, itag, redirect } = req.query;
+app.get("/stream/:videoUrl", async (req, res) => {
+  const videoId = extractVideoId(req.params.videoUrl);
+  if (!videoId) return res.status(400).json({ error: "Invalid YouTube URL or ID." });
 
-        if (!url) {
-            return res.status(400).json({ error: "Missing URL parameter" });
-        }
+  if (cache.has(videoId)) {
+      return res.json({ cached: true, data: cache.get(videoId) });
+  }
 
-        // Extract and validate video ID
-        const videoId = extractVideoId(url);
-        if (!videoId) {
-            return res
-                .status(400)
-                .json({ error: "Invalid YouTube URL or video ID" });
-        }
+  try {
+      const { axiosInstance, jar } = await createAxiosInstance(videoId);
+      const userAgent = getRandomUserAgent();
 
-        // Create cache key
-        const cacheKey = itag ? `${videoId}_${itag}` : videoId;
+      const headers = getBrowserHeaders(videoId, userAgent);
 
-        // Check cache
-        const cachedUrl = cache.get(cacheKey);
-        if (cachedUrl) {
-            return redirect === "true"
-                ? res.redirect(cachedUrl)
-                : res.json({ url: cachedUrl });
-        }
+      const response = await axiosInstance.get(`https://www.youtube.com/watch?v=${videoId}`, { headers });
 
-        // Get data from YouTube
-        const data = await getYouTubeStreamData(videoId);
+      // Extract stream info (parse HTML, etc.)
+      const streamData = extractStreamInfo(response.data); // you'd implement this
 
-        // Check video availability
-        if (data.playabilityStatus?.status !== "OK") {
-            const reason =
-                data.playabilityStatus?.reason || "Video unavailable";
-            return res.status(403).json({ error: reason });
-        }
+      cache.set(videoId, streamData);
+      await saveCookieJar(videoId, jar);
 
-        // Extract stream URL
-        const streamUrl = extractBestStreamUrl(data, itag);
-
-        if (!streamUrl) {
-            return res
-                .status(404)
-                .json({ error: "No suitable stream URL found" });
-        }
-
-        // Store in cache
-        cache.set(cacheKey, streamUrl);
-
-        // Return URL or redirect
-        return redirect === "true"
-            ? res.redirect(streamUrl)
-            : res.json({ url: streamUrl });
-    } catch (error) {
-        const errorMessage =
-            error.response?.data?.error || "Failed to extract stream URL";
-        res.status(error.response?.status || 500).json({ error: errorMessage });
-    }
+      res.json({ cached: false, data: streamData });
+  } catch (err) {
+      logError(err, `Fetching video ID: ${videoId}`);
+      res.status(500).json({ error: "Failed to fetch video." });
+  }
 });
+
 
 // Health and monitoring endpoints
 app.get("/health", (req, res) => {
